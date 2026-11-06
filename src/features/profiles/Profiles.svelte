@@ -1,0 +1,154 @@
+<script lang="ts">
+  import { app } from '../../state/app.svelte';
+  import { toggleProfile } from '../../lib/categories';
+  import { baseTemperature } from '../../lib/profiles';
+  import BrewPanel from '../home/BrewPanel.svelte';
+  import { copyProfile } from '../../lib/profileEdit';
+  import type { ProfileRecord } from '../../api/types';
+
+  // Duplicate opens the editor on a new, unsaved copy (Decaid needs a changed
+  // step or target before it will store it as a different profile).
+  function duplicate(record: ProfileRecord) {
+    app.editSeed = copyProfile(record.profile);
+    app.editing = null;
+  }
+
+  // Brew opens the same BrewPanel Home uses, over this list. Back returns here.
+  let brewing = $state<string | null>(null);
+  // A profile deleted from its editor closes its brew panel.
+  $effect(() => { if (brewing && !app.profileLineages.has(brewing)) brewing = null; });
+
+  // Every profile, newest version of each. Tap a category chip to add or
+  // remove the profile from that category on the Home screen.
+  let query = $state('');
+  let filter = $state<'all' | 'uncategorised'>('all');
+
+  const all = $derived(
+    [...app.profileLineages.entries()]
+      .map(([root, record]) => ({ root, record }))
+      .sort((a, b) => a.record.profile.title.localeCompare(b.record.profile.title)),
+  );
+  const inAnyCategory = $derived(new Set(app.categories.categories.flatMap((c) => c.profiles)));
+  const shown = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return all.filter(({ root, record }) =>
+      (filter === 'all' || !inAnyCategory.has(root)) &&
+      (!q || record.profile.title.toLowerCase().includes(q) || (record.profile.author ?? '').toLowerCase().includes(q)));
+  });
+
+  let saving = $state<string | null>(null);
+  async function toggle(categoryId: string, root: string) {
+    saving = `${categoryId}:${root}`;
+    try { await app.saveCategories(toggleProfile(app.categories, categoryId, root)); }
+    finally { saving = null; }
+  }
+</script>
+
+{#if brewing}
+  {#key brewing}
+    <div class="brewing"><BrewPanel profileRoot={brewing} onClose={() => (brewing = null)} /></div>
+  {/key}
+{:else}
+<div class="page">
+  <div class="bar glass">
+    <input class="well" type="search" placeholder="Search {all.length} profiles" bind:value={query} aria-label="Search profiles" />
+    <div class="filters" role="radiogroup" aria-label="Show">
+      <button class="glass" role="radio" aria-checked={filter === 'all'} class:active={filter === 'all'} onclick={() => (filter = 'all')}>All</button>
+      <button class="glass" role="radio" aria-checked={filter === 'uncategorised'} class:active={filter === 'uncategorised'} onclick={() => (filter = 'uncategorised')}>Not in a category</button>
+    </div>
+    <button class="new glass solid" onclick={() => (app.editing = null)}>New profile</button>
+  </div>
+
+  {#if app.categories.categories.length === 0}
+    <p class="note">Make a category on the Home screen first, then come back to fill it.</p>
+  {/if}
+
+  <ul>
+    {#each shown as { root, record } (root)}
+      {@const temp = baseTemperature(record.profile)}
+      <li class="glass frost">
+        <button class="info" aria-label="Edit {record.profile.title}" onclick={() => (app.editing = record)}>
+          <span class="title">{record.profile.title}</span>
+          <span class="meta">
+            {#if record.profile.author}<span>{record.profile.author}</span>{/if}
+            {#if temp !== null}<span>{temp}°C</span>{/if}
+            <span>{record.profile.steps.length} steps</span>
+          </span>
+        </button>
+        <div class="chips">
+          {#each app.categories.categories as c (c.id)}
+            {@const on = c.profiles.includes(root)}
+            <button
+              class="chip"
+              class:on
+              style="--tile: var(--cat-{c.colour ?? 1})"
+              aria-pressed={on}
+              disabled={saving !== null}
+              onclick={() => toggle(c.id, root)}
+            >{c.name}</button>
+          {/each}
+        </div>
+        <button class="edit glass" onclick={() => (app.editing = record)}>Edit</button>
+        <button class="edit glass" onclick={() => duplicate(record)}>Duplicate</button>
+        <button class="brew glass solid" onclick={() => (brewing = root)}>Brew</button>
+      </li>
+    {:else}
+      <li class="nothing glass">{query ? `No profiles match “${query}”` : 'Every profile is in a category'}</li>
+    {/each}
+  </ul>
+</div>
+{/if}
+
+<style>
+  .brewing { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+  .brew { flex: none; min-height: 44px; padding: 0 20px; border-radius: var(--radius-pill); font-size: var(--t-sm); font-weight: 700; }
+  .page { height: 100%; overflow-y: auto; padding: var(--gutter); }
+  .bar { display: flex; gap: 9px; align-items: center; margin-bottom: 14px; position: sticky; top: calc(-1 * var(--gutter) + 4px); padding: 6px; border-radius: var(--radius-pill); z-index: 2; }
+  input {
+    flex: 1;
+    min-height: var(--touch);
+    padding: 0 15px;
+    border-radius: var(--radius-pill);
+    border: 1px solid rgb(255 255 255 / 0.08);
+    font-size: var(--t-md);
+    user-select: text;
+  }
+  input:focus { border-color: rgb(255 255 255 / 0.5); outline: none; }
+  .filters { display: flex; gap: 4px; }
+  .filters button { min-height: 42px; padding: 0 15px; border-radius: var(--radius-pill); color: var(--paper-dim); }
+  .filters button.active { color: var(--paper); font-weight: 650; }
+  .note { color: var(--paper-dim); margin-bottom: 10px; }
+
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 15px;
+    border-radius: 20px;
+  }
+  .info { flex: 1; min-width: 0; display: grid; gap: 3px; text-align: left; min-height: var(--touch); align-content: center; }
+  .new { flex: none; min-height: 42px; padding: 0 16px; border-radius: var(--radius-pill); font-weight: 650; }
+  .edit { flex: none; min-height: 40px; padding: 0 14px; border-radius: var(--radius-pill); color: var(--paper); font-size: var(--t-xs); font-weight: 650; }
+  .title { font-size: var(--t-md); font-weight: 650; }
+  .meta { display: flex; flex-wrap: wrap; gap: 3px 10px; color: var(--paper-dim); font-size: var(--t-xs); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 60%; }
+  .chip {
+    min-height: 40px;
+    padding: 0 14px;
+    border-radius: var(--radius-pill);
+    background: var(--well);
+    box-shadow: var(--well-shadow);
+    color: var(--paper-dim);
+    font-size: var(--t-xs);
+    transition: background 160ms ease, box-shadow 160ms ease;
+  }
+  .chip.on {
+    background: linear-gradient(170deg, color-mix(in srgb, var(--tile) 100%, white 20%), var(--tile));
+    color: var(--cat-ink);
+    font-weight: 650;
+    box-shadow: 0 4px 12px -6px color-mix(in srgb, var(--tile) 70%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.6);
+  }
+  .chip:disabled { opacity: 0.7; }
+  .nothing { color: var(--paper-dim); justify-content: center; }
+</style>

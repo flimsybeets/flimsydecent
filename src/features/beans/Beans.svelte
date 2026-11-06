@@ -1,0 +1,140 @@
+<script lang="ts">
+  import { app } from '../../state/app.svelte';
+  import AddBag from './AddBag.svelte';
+  import CoffeeDialog from './CoffeeDialog.svelte';
+  import BagDialog from './BagDialog.svelte';
+  import type { Bean, BeanBatch } from '../../api/types';
+
+  let adding = $state(false);
+  let editingBean = $state<Bean | null>(null);
+  let editingBag = $state<BeanBatch | null>(null);
+  let showFinished = $state(false);
+
+  const beans = $derived(
+    app.beans
+      .filter((b) => !b.archived)
+      .map((bean) => ({
+        bean,
+        bags: app.batches
+          .filter((x) => x.beanId === bean.id && (showFinished || !x.archived))
+          .sort((a, b) => (b.roastDate ?? b.createdAt).localeCompare(a.roastDate ?? a.createdAt)),
+      }))
+      .filter((x) => showFinished || x.bags.length > 0),
+  );
+
+  $effect(() => { for (const { bean } of beans) void app.loadBeanPhoto(bean.id); });
+
+  // Shots per bag, asked one bag at a time (Decaid doesn't like a burst) and again after each pull.
+  let shotCounts = $state<Record<string, number>>({});
+  $effect(() => {
+    void app.shotsFinished;
+    const ids = beans.flatMap(({ bags }) => bags.map((b) => b.id));
+    let stop = false;
+    void (async () => {
+      for (const id of ids) {
+        if (stop) return;
+        try { shotCounts[id] = (await app.getShots({ beanBatchId: id, limit: 1 })).total; } catch { /* the button just shows no count */ }
+      }
+    })();
+    return () => { stop = true; };
+  });
+  function showShots(id: string) {
+    app.historyBag = id;
+    app.tab = 'history';
+  }
+
+  const fmtDate = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : null);
+
+</script>
+
+<div class="page">
+  <div class="bar">
+    <button class="add glass solid" onclick={() => (adding = true)}>Add a bag</button>
+    <label class="toggle glass frost"><input type="checkbox" bind:checked={showFinished} /> Show finished bags</label>
+  </div>
+
+  {#if beans.length === 0}
+    <div class="empty">
+      <p class="big">No open bags</p>
+      <p>Add the bag you're brewing now. Your grind and temperature for each profile will be remembered with it.</p>
+    </div>
+  {/if}
+
+  <ul class="beans">
+    {#each beans as { bean, bags } (bean.id)}
+      <li class="bean glass frost" class:coloured={!!app.coffeeColours[bean.id]} style:--bag={app.coffeeColours[bean.id] ?? undefined}>
+        <div class="bean-head">
+          {#if app.beanPhotos[bean.id]}<img class="bean-photo" src={app.beanPhotos[bean.id]} alt="Photo of {bean.name}" />{/if}
+          <div class="bean-title">
+            <button class="edit glass" onclick={() => (editingBean = bean)}>Edit</button>
+            <h2>{bean.name}</h2>
+            <p>{bean.roaster}{bean.country ? `, ${bean.country}` : ''}{bean.processing ? `, ${bean.processing}` : ''}</p>
+            {#if bean.notes}<p class="notes">{bean.notes}</p>{/if}
+          </div>
+        </div>
+        <ul class="bags">
+          {#each bags as b (b.id)}
+            <li class="bag well" class:finished={b.archived}>
+              <div class="bag-info">
+                <span>{fmtDate(b.roastDate) ? `Roasted ${fmtDate(b.roastDate)}` : 'Roast date not set'}</span>
+                {#if b.weightRemaining != null}<span class="sub">{Math.round(b.weightRemaining)} of {Math.round(b.weight ?? b.weightRemaining)} g left</span>{/if}
+                {#if b.frozen}<span class="sub">Frozen</span>{/if}
+              </div>
+              <div class="bag-actions">
+              <button class="finish glass" aria-label="Shots from this bag" onclick={() => showShots(b.id)}>Shots{shotCounts[b.id] !== undefined ? ` (${shotCounts[b.id]})` : ''}</button>
+              <button class="finish glass" onclick={() => (editingBag = b)}>Edit</button>
+              {#if !b.archived}
+                <button class="finish glass" onclick={() => app.finishBag(b.id)}>Finished</button>
+              {/if}
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </li>
+    {/each}
+  </ul>
+</div>
+
+{#if adding}
+  <AddBag onClose={() => (adding = false)} />
+{/if}
+{#if editingBean}
+  <CoffeeDialog bean={editingBean} onClose={() => (editingBean = null)} />
+{/if}
+{#if editingBag}
+  <BagDialog bag={editingBag} onClose={() => (editingBag = null)} />
+{/if}
+
+<style>
+  .page { height: 100%; overflow-y: auto; padding: var(--gutter); }
+  .bar { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
+  .add { min-height: var(--touch); padding: 0 21px; border-radius: var(--radius-pill); font-weight: 650; font-size: var(--t-md); }
+  .toggle { display: flex; align-items: center; gap: 8px; color: var(--paper-dim); min-height: var(--touch); padding: 0 16px; border-radius: var(--radius-pill); }
+  .toggle input { width: 20px; height: 20px; accent-color: var(--paper); }
+
+  .empty { max-width: 60ch; display: grid; gap: 6px; color: var(--paper-dim); }
+  .empty .big { color: var(--paper); font-size: var(--t-lg); font-weight: 650; }
+
+  ul { list-style: none; margin: 0; padding: 0; }
+  .beans { display: grid; grid-template-columns: repeat(auto-fill, minmax(315px, 1fr)); gap: 12px; }
+  /* Compact cards, so two rows of coffees fit on the 960x600 tablet. */
+  .bean { border-radius: 22px; padding: 12px 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-content: start; }
+  .bean-head { display: flex; gap: 10px; align-items: center; }
+  .bean-title { flex: 1 1 0; min-width: 0; }
+  .bean-photo { flex: none; width: 64px; height: 64px; border-radius: 14px; object-fit: cover; box-shadow: 0 3px 10px rgb(0 0 0 / 0.35), inset 0 0 0 1px rgb(255 255 255 / 0.12); }
+  .edit { float: right; min-height: 40px; padding: 0 14px; margin-left: 8px; border-radius: var(--radius-pill); color: var(--paper); font-size: var(--t-xs); font-weight: 650; }
+  .bean-head h2 { font-size: var(--t-lg); font-weight: 700; letter-spacing: -0.01em; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bean-head p { color: var(--paper-dim); font-size: var(--t-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .notes { font-size: var(--t-xs); }
+  .bags { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .bag { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px; border-radius: 16px; position: relative; }
+  .bag.finished { opacity: 0.55; }
+  /* The coffee's colour (from its photo): a soft tint and edge on the card, and a frame round the picture. */
+  .bean.coloured { background-image: linear-gradient(110deg, color-mix(in srgb, var(--bag) 20%, transparent), transparent 60%), var(--glass-fill-frost); box-shadow: inset 4px 0 0 var(--bag), var(--glass-shadow), var(--glass-sheen); }
+  .bean.coloured .bean-photo { box-shadow: 0 3px 10px rgb(0 0 0 / 0.35), 0 0 0 2px color-mix(in srgb, var(--bag) 75%, transparent); }
+  .bag-info { flex: 1 1 90px; min-width: 0; display: grid; align-content: center; gap: 2px; }
+  /* Beside the info when there's room; on a narrow card the buttons drop to their own row. */
+  .bag-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; justify-content: flex-end; flex: 0 1 auto; }
+  .sub { color: var(--paper-dim); font-size: var(--t-xs); }
+  .finish { min-height: 40px; padding: 0 12px; border-radius: var(--radius-pill); color: var(--paper-dim); font-size: var(--t-xs); }
+</style>

@@ -1,0 +1,239 @@
+<script lang="ts">
+  import { app } from '../../state/app.svelte';
+  import Modal from '../../components/Modal.svelte';
+  import Stepper from '../../components/Stepper.svelte';
+  import PhotoCrop from '../../components/PhotoCrop.svelte';
+  import { frameBlob, openFrontCamera, stopStream } from '../../lib/photo';
+  import { roasterSuggestions } from '../../lib/roasters';
+
+  let { onClose }: { onClose: () => void } = $props();
+
+  // Bean: a new coffee by default (most bags are), or another bag of one you have.
+  let beanId = $state<string | 'new'>('new');
+  let roaster = $state('');
+  let nameInput = $state<HTMLInputElement>();
+  // Roasters you've bought from before (every coffee, finished ones too), matching what's typed.
+  const roasters = $derived(roasterSuggestions(app.beans, roaster));
+  function pickRoaster(r: string) {
+    roaster = r;
+    nameInput?.focus();
+  }
+  let name = $state('');
+  let roastDate = $state(new Date().toISOString().slice(0, 10));
+  let weight = $state<number | undefined>(250);
+
+  // Photo
+  let photo = $state<string | null>(null);
+  /** The picture as taken or chosen, kept so it can be cropped again; `cropping` is the one being cropped now. */
+  let raw = $state<Blob | null>(null);
+  let cropping = $state<Blob | null>(null);
+  let stream = $state<MediaStream | null>(null);
+  let video = $state<HTMLVideoElement>();
+  let fileInput = $state<HTMLInputElement>();
+  let uploadInput = $state<HTMLInputElement>();
+  let cameraNote = $state<string | null>(null);
+
+  let saving = $state(false);
+  let error = $state<string | null>(null);
+
+  // The photo belongs to the coffee: offered for a new coffee, or one that has none yet.
+  $effect(() => { if (beanId !== 'new') void app.loadBeanPhoto(beanId); });
+  // Only once it's known the coffee has none (null), not while its photo is still loading.
+  const wantsPhoto = $derived(beanId === 'new' || app.beanPhotos[beanId] === null);
+  // Switching to a coffee that has a photo hides the camera: turn it off too.
+  $effect(() => { if (!wantsPhoto && stream) { stopStream(stream); stream = null; } });
+  /** The bag is in Decaid; only the photo failed. Save then just closes (never adds it twice). */
+  let added = $state(false);
+
+  const canSave = $derived(!saving && (beanId !== 'new' || (roaster.trim() && name.trim())));
+
+  $effect(() => {
+    if (video && stream) {
+      video.srcObject = stream;
+      void video.play().catch(() => {});
+    }
+  });
+  $effect(() => () => stopStream(stream));
+
+  async function takePhoto() {
+    cameraNote = null;
+    const s = await openFrontCamera();
+    if (s) { stream = s; return; }
+    // Live camera unavailable (dev server, consent denied, iOS picker).
+    // Fall back to the system capture/file picker.
+    fileInput?.click();
+  }
+
+  async function snap() {
+    if (!video) return;
+    try { raw = cropping = await frameBlob(video); } catch { cameraNote = "That photo couldn't be taken. Try again."; return; }
+    stopStream(stream);
+    stream = null;
+  }
+
+  async function onFile(e: Event) {
+    const file = (e.currentTarget as HTMLInputElement).files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { cameraNote = "That photo couldn't be read. Try another."; return; }
+    raw = cropping = file;
+    (e.currentTarget as HTMLInputElement).value = '';
+  }
+
+  async function save() {
+    if (added) { onClose(); return; }
+    saving = true;
+    error = null;
+    try {
+      const bag = await app.addBag(
+        beanId === 'new' ? { roaster: roaster.trim(), name: name.trim() } : beanId,
+        {
+          roastDate: roastDate ? new Date(`${roastDate}T12:00:00`).toISOString() : null,
+          weight: weight ?? null,
+          openDate: new Date().toISOString(),
+        },
+      );
+      if (photo && wantsPhoto) {
+        try {
+          await app.saveBeanPhoto(bag.beanId, photo);
+        } catch {
+          added = true;
+          error = "The bag was added, but the photo couldn't be saved. Try again from Edit coffee.";
+          return;
+        }
+      }
+      onClose();
+    } catch (e) {
+      error = `The bag wasn't added: ${(e as Error).message}`;
+    } finally {
+      saving = false;
+    }
+  }
+</script>
+
+<Modal title="Add a bag" {onClose}>
+  {#if wantsPhoto}
+  <div class="photo">
+    {#if stream}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video bind:this={video} playsinline muted></video>
+      <button class="snap glass solid" onclick={snap}>Take photo</button>
+    {:else if photo}
+      <img src={photo} alt="The coffee" />
+      <div class="photo-actions">
+        {#if raw}<button class="retake glass" onclick={() => (cropping = raw)}>Crop photo</button>{/if}
+        <button class="retake glass" onclick={takePhoto}>Take photo</button>
+        <button class="retake glass" onclick={() => uploadInput?.click()}>Upload photo</button>
+      </div>
+    {:else}
+      <span class="photo-label">Photo of the coffee (optional)</span>
+      <div class="photo-pick">
+        <button class="camera glass" onclick={takePhoto}>
+          <span class="lens" aria-hidden="true"></span>
+          Take photo
+        </button>
+        <button class="camera glass" onclick={() => uploadInput?.click()}>
+          <span class="upload" aria-hidden="true"></span>
+          Upload photo
+        </button>
+      </div>
+    {/if}
+    <!-- Take photo falls back to the system camera; Upload photo opens the files/gallery picker. -->
+    <input bind:this={fileInput} class="sr-only" type="file" accept="image/*" capture="user" onchange={onFile} tabindex="-1" aria-hidden="true" />
+    <input bind:this={uploadInput} class="sr-only" type="file" accept="image/*" onchange={onFile} tabindex="-1" aria-hidden="true" />
+    {#if cameraNote}<p class="note">{cameraNote}</p>{/if}
+  </div>
+  {/if}
+
+  <label>
+    <span>Coffee</span>
+    <select bind:value={beanId}>
+      <option value="new">A new coffee</option>
+      {#each app.beans.filter((b) => !b.archived) as b (b.id)}
+        <option value={b.id}>Another bag of {b.roaster} {b.name}</option>
+      {/each}
+    </select>
+  </label>
+
+  {#if beanId === 'new'}
+    <div class="two">
+      <label><span>Roaster</span><input bind:value={roaster} placeholder="e.g. Proud Mary" /></label>
+      <label><span>Coffee name</span><input bind:this={nameInput} bind:value={name} placeholder="e.g. Ethiopia Hambela" /></label>
+    </div>
+    {#if roasters.length > 0}
+      <div class="roasters" role="group" aria-label="Roasters you've bought from">
+        {#each roasters as r (r)}
+          <button type="button" class="chip glass" onmousedown={(e) => e.preventDefault()} onclick={() => pickRoaster(r)}>{r}</button>
+        {/each}
+      </div>
+    {/if}
+  {/if}
+
+  <div class="two">
+    <label><span>Roast date</span><input type="date" bind:value={roastDate} /></label>
+    <Stepper label="Bag weight" bind:value={weight} min={50} max={5000} step={50} unit="g" />
+  </div>
+
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
+
+  {#snippet actions()}
+    <button class="secondary glass" onclick={onClose}>Cancel</button>
+    <button class="primary glass solid" disabled={!canSave} onclick={save}>{added ? 'Done' : saving ? 'Adding…' : 'Add bag'}</button>
+  {/snippet}
+</Modal>
+
+{#if cropping}
+  <PhotoCrop source={cropping} onDone={(url) => { photo = url; cropping = null; }} onCancel={() => { cropping = null; }} />
+{/if}
+
+<style>
+  .photo { display: grid; gap: 8px; justify-items: start; }
+  .camera {
+    display: flex; align-items: center; gap: 12px;
+    width: 100%;
+    min-height: 82px;
+    padding: 0 18px;
+    border-radius: 18px;
+    color: var(--paper-dim);
+    font-size: var(--t-md);
+  }
+  .photo { width: 100%; }
+  .photo-label { color: var(--paper-dim); font-size: var(--t-sm); }
+  .photo-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+  .photo-pick .camera { min-height: 64px; }
+  /* An arrow up out of a tray. */
+  .upload { width: 30px; height: 24px; border: 3px solid currentColor; border-top: none; border-radius: 0 0 6px 6px; position: relative; margin-top: 6px; }
+  .upload::before { content: ''; position: absolute; left: 50%; top: -12px; width: 3px; height: 18px; background: currentColor; translate: -50% 0; }
+  .upload::after { content: ''; position: absolute; left: 50%; top: -13px; width: 9px; height: 9px; border-left: 3px solid currentColor; border-top: 3px solid currentColor; translate: -50% 0; rotate: 45deg; }
+  .lens { width: 40px; height: 26px; border: 3px solid currentColor; border-radius: 7px; position: relative; }
+  .lens::after { content: ''; position: absolute; inset: 5px 9px; border: 3px solid currentColor; border-radius: 50%; }
+  /* Mirrored like a selfie view so it's easy to line the bag up; the saved photo isn't, so its label reads right. */
+  video { transform: scaleX(-1); }
+  video, img { width: 100%; max-height: 240px; object-fit: cover; border-radius: 16px; background: var(--well); box-shadow: var(--glass-shadow); }
+  .photo-actions { display: flex; gap: 8px; }
+  .snap, .retake { min-height: var(--touch); padding: 0 20px; border-radius: var(--radius-pill); font-weight: 650; }
+  .note { color: var(--warn); font-size: var(--t-xs); }
+
+  label { display: grid; gap: 4px; color: var(--paper-dim); font-size: var(--t-sm); }
+  input, select {
+    min-height: var(--touch);
+    padding: 0 12px;
+    border-radius: var(--radius-control);
+    border: 1px solid rgb(255 255 255 / 0.08);
+    background: var(--well);
+    box-shadow: var(--well-shadow);
+    color: var(--paper);
+    font-size: var(--t-md);
+    user-select: text;
+  }
+  input:focus, select:focus { border-color: var(--paper); outline: none; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end; }
+
+  .error { color: var(--stop); }
+  .primary, .secondary { min-height: var(--touch); padding: 0 21px; border-radius: var(--radius-control); font-weight: 650; }
+  .primary:disabled { opacity: 0.4; }
+  .secondary { color: var(--paper-dim); }
+  select { font-family: inherit; }
+  /* Tap a roaster you've bought from before; the list narrows as you type. */
+  .roasters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+  .chip { min-height: 40px; padding: 0 14px; border-radius: var(--radius-pill); color: var(--paper); font-size: var(--t-sm); font-weight: 600; }
+</style>

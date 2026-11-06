@@ -1,0 +1,467 @@
+<script lang="ts">
+  import { untrack } from 'svelte';
+  import { app } from '../../state/app.svelte';
+  import type { BrewStart } from '../../lib/brewAgain';
+  import { resolveDialIn, type DialIn, type DialInSource } from '../../lib/dialIn';
+  import { baseTemperature } from '../../lib/profiles';
+  import { doseCheck } from '../../lib/guide';
+  import Stepper from '../../components/Stepper.svelte';
+  import type { BeanBatch } from '../../api/types';
+  import { startBag } from '../../lib/defaultBag';
+  import LastShotDialog from './LastShotDialog.svelte';
+
+    let { profileRoot, onClose, initial }: { profileRoot: string; onClose: () => void; initial?: BrewStart } = $props();
+
+  const gc = $derived(app.grindControl);
+  const record = $derived(app.profileLineages.get(profileRoot));
+  const base = $derived(record ? baseTemperature(record.profile) : null);
+
+  // Open bags, most recently roasted first.
+  const bags = $derived(
+    app.batches
+      .filter((b) => !b.archived)
+      .map((b) => ({ batch: b, bean: app.beans.find((x) => x.id === b.beanId) }))
+      .sort((a, b) => (b.batch.roastDate ?? b.batch.createdAt).localeCompare(a.batch.roastDate ?? a.batch.createdAt)),
+  );
+
+  // Start on: the bag asked for, this profile's default, the bag last used with
+  // it, the bag on the machine, then the newest (lib/defaultBag).
+  let batchId = $state<string | null>(null);
+  /** "Don't track": no bag (a freezer dose, a sample). Nothing goes on a bag, and the shot has no coffee. */
+  const UNTRACKED = 'untracked';
+  $effect.pre(() => {
+    if (batchId === null) {
+      batchId = startBag({
+        open: bags.map((b) => b.batch), profileRoot, requested: initial?.batchId,
+        defaults: app.defaultBags, onMachine: app.workflow.context?.beanBatchId,
+      }) ?? UNTRACKED; // no open bags: brew untracked
+    }
+  });
+  const defaultId = $derived(app.defaultBags[profileRoot] ?? null);
+  let defaultError = $state(false);
+  async function toggleDefault() {
+    defaultError = false;
+    try { await app.setDefaultBag(profileRoot, defaultId === batchId ? null : batchId); } catch { defaultError = true; }
+  }
+  const batch = $derived<BeanBatch | null>(app.batches.find((b) => b.id === batchId) ?? null);
+
+  let grind = $state<number | undefined>();
+  let dose = $state<number | undefined>();
+  let yieldG = $state<number | undefined>();
+  let temp = $state<number | undefined>();
+  let source = $state<DialInSource | 'shot' | 'untracked'>('profile-default');
+  // The first load takes the shot's numbers (once); changing bag afterwards goes back to what each bag remembers.
+  // svelte-ignore state_referenced_locally
+  let pendingInitial: DialIn | undefined = initial?.dialIn;
+  let starting = $state(false);
+  let startError = $state<string | null>(null);
+
+  // Whenever the bag changes, load what was dialled in for bag + profile.
+  // Only batchId is tracked; saving shouldn't reset what's on screen.
+  $effect(() => {
+    const id = batchId;
+    untrack(() => loadDialIn(id));
+  });
+
+  /** The values as loaded for this bag; a change from these is worth saving on the bag. */
+  let loadedKey = '';
+  /** Whether this bag's dial-in for this profile has been written since it was loaded. */
+  let savedOnBag = false;
+
+  function loadDialIn(id: string | null) {
+    const b = app.batches.find((x) => x.id === id) ?? null;
+    const resolved = b ? resolveDialIn(b, profileRoot, app.batches) : { dialIn: {}, source: 'profile-default' as const };
+    const fromShot = pendingInitial;
+    pendingInitial = undefined;
+    // Untracked: what was last used untracked with this profile (this session), else the profile's own.
+    const untracked = id === UNTRACKED ? app.untrackedDialIn[profileRoot] : undefined;
+    const d = fromShot ? { ...resolved.dialIn, ...fromShot } : untracked ?? resolved.dialIn;
+    source = fromShot ? 'shot' : id === UNTRACKED ? 'untracked' : resolved.source;
+    const g = d.grind !== undefined ? Number.parseFloat(d.grind) : NaN;
+    grind = Number.isFinite(g) ? g : undefined;
+    dose = d.dose ?? app.workflow.context?.targetDoseWeight ?? 18;
+    yieldG = d.yield ?? record?.profile.target_weight ?? undefined;
+    temp = base !== null ? base + (d.tempOffset ?? 0) : undefined;
+    loadedKey = JSON.stringify(currentDialIn());
+    savedOnBag = !fromShot && resolved.source === 'this-bag';
+  }
+
+  // Last shot with this profile and bag: look at it, and optionally take its settings.
+  let showingLast = $state(false);
+  // The button only shows when there is such a shot. Asked once per profile + bag
+  // (and again after a pull), a moment after the bag settles.
+  let hasLast = $state(false);
+  $effect(() => {
+    const title = record?.profile.title;
+    const id = batch?.id;
+    void app.shotsFinished;
+    hasLast = false;
+    if (!title || !id) return;
+    let live = true;
+    const t = setTimeout(() => {
+      app.lastShotIdWith(title, id).then((s) => { if (live) hasLast = s !== null; }, () => {});
+    }, 300);
+    return () => { live = false; clearTimeout(t); };
+  });
+  function useLastShot(d: DialIn) {
+    const g = d.grind !== undefined ? Number.parseFloat(d.grind) : NaN;
+    if (Number.isFinite(g)) grind = g;
+    if (d.dose) dose = d.dose;
+    if (d.yield) yieldG = d.yield;
+    // The dialog passes the shot's absolute temperature in tempOffset.
+    if (d.tempOffset !== undefined && base !== null) temp = d.tempOffset;
+  }
+
+  function currentDialIn(): DialIn {
+    return {
+      grind: grind === undefined ? undefined : String(grind),
+      dose,
+      yield: yieldG,
+      tempOffset: temp !== undefined && base !== null ? Math.round((temp - base) * 10) / 10 : 0,
+    };
+  }
+
+  // ---- Keeping the machine in step -----------------------------------------
+  // There's no Load button: whatever is picked here goes onto the machine on
+  // its own, a moment after the last change (so holding + doesn't send a
+  // request per step; Decaid doesn't debounce). Sends run one after another,
+  // identical ones are skipped, and nothing is sent while a shot is pulling.
+
+  const DEBOUNCE_MS = 600;
+  let sync = $state<'idle' | 'pending' | 'sending' | 'ok' | 'failed'>('idle');
+  let syncError = $state('');
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let chain: Promise<void> = Promise.resolve();
+  let lastSent = '';
+
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    sync = 'pending';
+    timer = setTimeout(() => void flush(), DEBOUNCE_MS);
+  }
+
+  /** Send the current settings now (after any send already under way). */
+  function flush(): Promise<void> {
+    if (timer) { clearTimeout(timer); timer = null; }
+    const dialIn = currentDialIn();
+    const forBatch = batch;
+    chain = chain.then(() => send(dialIn, forBatch));
+    return chain;
+  }
+
+  async function send(dialIn: DialIn, forBatch: BeanBatch | null) {
+    const key = JSON.stringify({ profileRoot, batch: forBatch?.id ?? null, dialIn });
+    if (key === lastSent) { if (sync !== 'failed') sync = 'ok'; return; }
+    if (app.shotActive) { sync = 'pending'; return; } // picked up when the shot ends
+    sync = 'sending';
+    try {
+      await app.applySelection(profileRoot, forBatch, dialIn);
+      lastSent = key;
+      if (!forBatch && batchId === UNTRACKED) app.untrackedDialIn[profileRoot] = dialIn;
+      const dialKey = JSON.stringify(dialIn);
+      if (forBatch && dialKey !== loadedKey) {
+        await app.saveDialIn(forBatch, profileRoot, dialIn);
+        loadedKey = dialKey;
+        savedOnBag = true;
+      }
+      sync = 'ok';
+    } catch (e) {
+      sync = 'failed';
+      syncError = (e as Error).message;
+    }
+  }
+
+  // Any change (and opening the panel) schedules a send.
+  $effect(() => {
+    void [profileRoot, batchId, grind, dose, yieldG, temp];
+    untrack(schedule);
+  });
+  // A change made mid-shot goes on once the shot is over.
+  $effect(() => { if (!app.shotActive && sync === 'pending' && !timer) untrack(schedule); });
+  // Closing the panel sends anything still waiting.
+  $effect(() => () => { if (timer) void flush(); });
+
+  async function startShot() {
+    starting = true;
+    startError = null;
+    try {
+      await flush();
+      if (sync === 'failed') throw new Error(syncError);
+      // A shot was pulled with these values: keep them on the bag even if unchanged.
+      if (batch && !savedOnBag) { await app.saveDialIn(batch, profileRoot, currentDialIn()); savedOnBag = true; }
+      await app.startEspresso();
+    } catch (e) {
+      startError = (e as Error).message;
+    } finally {
+      starting = false;
+    }
+  }
+
+  const SOURCE_TEXT: Record<DialInSource, string> = {
+    'this-bag': 'Your settings for this bag',
+    'previous-bag': 'Carried over from your last bag of this coffee',
+    'profile-default': 'First time with this bag and profile',
+  };
+
+  function roastAge(b: BeanBatch): string {
+    if (!b.roastDate) return 'Roast date not set';
+    const days = Math.floor((Date.now() - Date.parse(b.roastDate)) / 86_400_000);
+    return days <= 0 ? 'Roasted today' : days === 1 ? 'Roasted yesterday' : `Roasted ${days} days ago`;
+  }
+
+  $effect(() => { for (const b of bags) void app.loadBeanPhoto(b.batch.beanId); });
+
+  // Weighing beans: the scale's reading against the dose (green within 0.1 g).
+  const weigh = $derived(app.scaleConnected && !app.shotActive ? doseCheck(app.weight, dose) : null);
+  const weighText = $derived(!weigh ? '' : weigh.state === 'ok' ? 'Spot on' : weigh.state === 'under' ? `Add ${weigh.delta.toFixed(1)} g` : `Take out ${Math.abs(weigh.delta).toFixed(1)} g`);
+
+</script>
+
+<aside class="panel glass thick" aria-label="Brew settings">
+  <div class="head">
+    <button class="back glass" onclick={onClose}>‹ Profiles</button>
+    <h2>{record?.profile.title ?? 'Profile'}</h2>
+    {#if record}<button class="edit glass" onclick={() => (app.editing = record)}>Edit</button>{/if}
+  </div>
+
+  <div class="body">
+  <section class="bags" aria-label="Bag">
+    <div class="bag-head">
+      <h3>Bag</h3>
+      {#if batchId && batchId !== UNTRACKED && bags.length > 1}
+        <button class="default glass" class:on={defaultId === batchId} aria-pressed={defaultId === batchId} onclick={toggleDefault}>
+          {defaultId === batchId ? '★ Default' : 'Set as default'}
+        </button>
+      {/if}
+    </div>
+    {#if defaultError}<p class="none">Couldn't save the default. Try again.</p>{/if}
+    {#if bags.length === 0}
+      <p class="none">No open bags. Add one in the Beans tab.</p>
+    {/if}
+      <div class="bag-list" role="radiogroup" aria-label="Bag">
+        {#each bags as { batch: b, bean } (b.id)}
+          <button class="bag glass" style:--bag={app.coffeeColours[b.beanId] ?? undefined} class:coloured={!!app.coffeeColours[b.beanId]} class:lit={b.id === batchId} class:selected={b.id === batchId} role="radio" aria-checked={b.id === batchId} onclick={() => (batchId = b.id)}>
+            {#if app.beanPhotos[b.beanId]}
+              <img src={app.beanPhotos[b.beanId]} alt="" />
+            {:else}
+              <span class="swatch" aria-hidden="true">{bean?.name.slice(0, 1) ?? '?'}</span>
+            {/if}
+            <span class="bag-text">
+              <span class="bean">{bean?.name ?? 'Unknown bean'}</span>
+              <span class="sub">{bean?.roaster ?? ''}</span>
+              {#if b.id === defaultId}<span class="tag">Default</span>{/if}
+              <span class="sub">{roastAge(b)}{b.weightRemaining != null ? `, ${Math.round(b.weightRemaining)} g left` : ''}</span>
+            </span>
+          </button>
+        {/each}
+        <!-- Freezer doses, samples, someone else's beans: brew without a bag. -->
+        <button class="bag glass untracked" class:lit={batchId === UNTRACKED} class:selected={batchId === UNTRACKED} role="radio" aria-checked={batchId === UNTRACKED} onclick={() => (batchId = UNTRACKED)}>
+          <span class="swatch" aria-hidden="true">–</span>
+          <span class="bag-text">
+            <span class="bean">Don't track</span>
+            <span class="sub">Freezer dose or a one-off: no bag, nothing saved</span>
+          </span>
+        </button>
+      </div>
+  </section>
+
+  <section class="dial" aria-label="Dial-in">
+    <div class="source-row">
+      <p class="source">{source === 'shot' ? 'From the shot you picked' : source === 'untracked' ? 'Not tracked: nothing is saved to a bag' : SOURCE_TEXT[source]}</p>
+      {#if batch && record && hasLast}<button class="last glass" onclick={() => (showingLast = true)}>Last shot</button>{/if}
+    </div>
+    {#if source === 'shot' && initial?.note}<p class="source note">{initial.note}</p>{/if}
+    <div class="grid">
+      <Stepper compact label="Grind" bind:value={grind} min={gc.min} max={gc.max} step={gc.step} decimals={gc.decimals} placeholder="Not set" />
+      <Stepper compact label="Temperature" bind:value={temp} min={(base ?? 90) - 10} max={(base ?? 90) + 10} step={0.5} decimals={1} unit="°C" disabled={base === null} />
+      <div class="dose {weigh?.state ?? ''}"><Stepper compact label="Dose" bind:value={dose} min={5} max={30} step={0.1} decimals={1} unit="g" /></div>
+      <Stepper compact label="Yield" bind:value={yieldG} min={0} max={400} step={0.5} decimals={1} unit="g" placeholder="Off" />
+    </div>
+    {#if base !== null && temp !== undefined && temp !== base}
+      <p class="offset">{temp > base ? '+' : ''}{(temp - base).toFixed(1)}° from the profile's {base}°</p>
+    {/if}
+  </section>
+
+  </div>
+
+  <div class="go">
+    <!-- Pinned here, always in view, while beans are on the scale. -->
+    {#if weigh && dose}
+      <div class="weigh {weigh.state}" role="status" aria-label="Beans on the scale">
+        <div class="bar"><div class="fill" style="width: {Math.min(100, ((app.weight ?? 0) / dose) * 100)}%"></div></div>
+        <p><b>{(app.weight ?? 0).toFixed(1)}</b> of {dose.toFixed(1)} g <span>{weighText}</span></p>
+      </div>
+    {/if}
+    <p class="sync {sync}" role="status">
+      {#if sync === 'failed'}
+        Not on the machine: {syncError} <button onclick={() => { lastSent = ''; void flush(); }}>Try again</button>
+      {:else if sync === 'ok'}
+        On the machine
+      {:else if app.shotActive}
+        Goes on after this shot
+      {:else}
+        Updating the machine…
+      {/if}
+    </p>
+    {#if startError}<p class="msg bad" role="alert">Couldn't start: {startError}</p>{/if}
+    {#if app.ghc}
+      <p class="ghc">Start the shot on the group head.</p>
+    {:else}
+      <button class="start glass" disabled={starting || app.machine.state?.state === 'espresso'} onclick={startShot}>
+        {starting ? 'Starting…' : 'Start shot'}
+      </button>
+    {/if}
+  </div>
+</aside>
+
+{#if showingLast && batch && record}
+  <LastShotDialog profileTitle={record.profile.title} batchId={batch.id}
+    bagName={app.beans.find((x) => x.id === batch.beanId)?.name ?? 'this bag'}
+    onClose={() => (showingLast = false)} onUse={useLastShot} />
+{/if}
+
+<style>
+  /* Fills the Home area: back / title / edit on top, then two columns.
+     Left = the bag list (scrolls inside itself if there are many); right =
+     dial-in with the sync note and Start shot pinned under it. `.body` has
+     display: contents so its two sections are grid items of the panel.
+     (A glass element must not scroll itself: its rim would scroll away too.) */
+  .panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'head head' 'bags dial' 'bags go';
+    column-gap: calc(var(--gutter) * 1.4);
+    row-gap: 10px;
+    min-height: 0;
+    overflow: hidden;
+    margin: var(--gutter) var(--gutter) calc(var(--gutter) + var(--kb));
+    padding: var(--gutter);
+    border-radius: 27px;
+    animation: slide 200ms cubic-bezier(.2,.8,.2,1);
+  }
+  @keyframes slide { from { transform: translateY(14px); opacity: 0; } }
+
+  /* Typing a number: the keyboard leaves too little height for both columns,
+     so only the dial-in steppers stay, scrolling if they must; the bag list,
+     title and Start shot come back when the keyboard closes. */
+  :global(html.kb-open) .panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: 'dial';
+    margin-top: 6px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+  :global(html.kb-open) .head,
+  :global(html.kb-open) .bags,
+  :global(html.kb-open) .go,
+  :global(html.kb-open) .source-row,
+  :global(html.kb-open) .source.note { display: none; }
+  :global(html.kb-open) .dial { overflow-y: auto; align-content: start; }
+
+  .body { display: contents; }
+  .head { grid-area: head; display: flex; align-items: center; gap: 12px; }
+  .bags { grid-area: bags; display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+  .dial { grid-area: dial; min-height: 0; }
+  .go { grid-area: go; }
+  h2 { font-size: var(--t-lg); font-weight: 700; line-height: 1.1; letter-spacing: -0.01em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  h3 { font-size: var(--t-sm); font-weight: 500; color: var(--paper-dim); margin-bottom: 6px; }
+  .bag-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .bag-head h3 { margin-bottom: 0; }
+  .default { min-height: 40px; padding: 0 14px; border-radius: var(--radius-pill); font-size: var(--t-xs); font-weight: 650; color: var(--paper-dim); }
+  .default.on { color: var(--paper); }
+  .tag { justify-self: start; padding: 1px 8px; border-radius: var(--radius-pill); background: rgb(255 255 255 / 0.14); color: var(--paper); font-size: var(--t-xs); font-weight: 650; }
+  .back { flex: none; min-height: 42px; padding: 0 15px 0 10px; border-radius: var(--radius-pill); color: var(--paper-dim); font-size: var(--t-sm); }
+  .edit { flex: none; height: 42px; padding: 0 14px; margin-left: auto; border-radius: var(--radius-pill); color: var(--paper); font-size: var(--t-xs); font-weight: 650; }
+
+  .bag-list { display: grid; gap: 6px; align-content: start; min-height: 0; overflow-y: auto; padding: 3px; margin: -3px; }
+  .bag {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 16px;
+    text-align: left;
+  }
+  .bag.coloured { box-shadow: inset 4px 0 0 var(--bag), var(--glass-sheen); }
+  .bag.selected { box-shadow: 0 0 0 3px var(--tile), var(--glass-sheen); }
+  .bag.coloured.selected { box-shadow: 0 0 0 3px var(--tile), inset 4px 0 0 var(--bag), var(--glass-sheen); }
+  .bag img, .swatch {
+    width: 44px; height: 44px; flex: none;
+    border-radius: 10px;
+    object-fit: cover;
+    box-shadow: 0 3px 9px rgb(0 0 0 / 0.3);
+  }
+  .swatch {
+    display: grid; place-items: center;
+    background: var(--cat-7);
+    color: var(--cat-ink);
+    font-size: var(--t-lg);
+    font-weight: 750;
+  }
+  .untracked .swatch { background: transparent; color: var(--paper-dim); border: 2px dashed rgb(255 255 255 / 0.3); }
+  .bag-text { display: grid; min-width: 0; }
+  .bean { font-weight: 650; font-size: var(--t-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { color: var(--paper-dim); font-size: var(--t-xs); }
+  .none { color: var(--paper-dim); }
+
+  .dial { display: grid; gap: 10px; align-content: start; }
+  .source { color: var(--paper-dim); font-size: var(--t-xs); }
+  .source-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .last { flex: none; min-height: 40px; padding: 0 14px; border-radius: var(--radius-pill); font-size: var(--t-xs); font-weight: 650; color: var(--paper); }
+  .source.note { color: var(--warn); margin-top: -6px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 10px; }
+  /* Beans on the scale vs the dose: amber under, green spot on, coral over. */
+  .weigh { --c: 242 179 61; display: grid; gap: 6px; }
+  .weigh.ok { --c: 76 230 140; }
+  .weigh.over { --c: 255 111 97; }
+  .weigh .bar { height: 10px; border-radius: var(--radius-pill); background: var(--well); box-shadow: var(--well-shadow); overflow: hidden; }
+  .weigh .fill { height: 100%; border-radius: inherit; background: rgb(var(--c)); box-shadow: 0 0 12px rgb(var(--c) / 0.7); transition: width 120ms linear, background 250ms ease; }
+  .weigh p { display: flex; align-items: baseline; gap: 6px; color: var(--paper-dim); font-size: var(--t-sm); }
+  .weigh b { color: rgb(var(--c)); font-size: var(--t-md); }
+  .weigh span { margin-left: auto; color: rgb(var(--c)); font-weight: 700; }
+  .weigh.ok span::before { content: '✓ '; }
+  .dose :global(.row) { transition: box-shadow 250ms ease; }
+  .dose.under :global(.row) { box-shadow: 0 0 0 2px rgb(242 179 61 / 0.7), var(--well-shadow); }
+  .dose.ok :global(.row) { box-shadow: 0 0 0 2px rgb(76 230 140), 0 0 18px rgb(76 230 140 / 0.55); }
+  .dose.over :global(.row) { box-shadow: 0 0 0 2px rgb(255 111 97 / 0.8), var(--well-shadow); }
+  .offset { color: var(--paper-dim); font-size: var(--t-xs); }
+
+  .go { display: grid; gap: 7px; }
+  .sync { display: flex; align-items: center; gap: 8px; color: var(--paper-faint); font-size: var(--t-xs); min-height: 20px; }
+  .sync::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--paper-faint); flex: none; }
+  .sync.ok { color: var(--go); }
+  .sync.ok::before { background: var(--go); box-shadow: 0 0 8px var(--go); }
+  .sync.pending::before, .sync.sending::before { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+  .sync.failed { color: var(--stop); }
+  .sync.failed::before { background: var(--stop); }
+  .sync button { color: var(--paper); text-decoration: underline; min-height: 36px; }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .ghc { color: var(--paper-dim); font-size: var(--t-sm); }
+  .msg { grid-column: 1 / -1; color: var(--go); font-size: var(--t-sm); }
+  .msg.bad { color: var(--stop); }
+  .start {
+    min-height: 61px;
+    border-radius: var(--radius-tile);
+    font-size: var(--t-md);
+    font-weight: 700;
+  }
+  .start {
+    color: var(--cat-ink);
+    background: var(--tile);
+    background:
+      radial-gradient(120% 80% at 20% 0%, rgb(255 255 255 / 0.5), transparent 60%),
+      linear-gradient(165deg, var(--tile), color-mix(in srgb, var(--tile) 78%, black));
+    box-shadow: 0 12px 26px -12px color-mix(in srgb, var(--tile) 70%, transparent), inset 0 1px 0 rgb(255 255 255 / 0.7);
+  }
+  .start:disabled { opacity: 0.5; }
+
+  /* Narrow: one column; the bag list and dial-in scroll, Start shot stays pinned. */
+  @media (max-width: 760px) {
+    .panel { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'head' 'body' 'go'; }
+    .body { display: grid; grid-area: body; gap: 14px; align-content: start; min-height: 0; overflow-y: auto; margin: 0 -8px; padding: 3px 6px; }
+    .bags, .dial { grid-area: auto; }
+    .bag-list { overflow: visible; }
+  }
+</style>

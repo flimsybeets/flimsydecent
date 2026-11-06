@@ -1,0 +1,272 @@
+<script lang="ts">
+  import { toneOverlay } from './lib/background';
+  import { app, type Tab } from './state/app.svelte';
+  import BottomBar from './components/BottomBar.svelte';
+  import SteamModal from './components/SteamModal.svelte';
+  import ShotView from './components/ShotView.svelte';
+  import Screensaver from './components/Screensaver.svelte';
+  import ActivityView from './components/ActivityView.svelte';
+  import { activityKind } from './lib/activity';
+  import ProfileEditor from './features/profiles/ProfileEditor.svelte';
+  import Guide from './features/guide/Guide.svelte';
+  import Home from './features/home/Home.svelte';
+  import Profiles from './features/profiles/Profiles.svelte';
+  import History from './features/history/History.svelte';
+  import Beans from './features/beans/Beans.svelte';
+  import Settings from './features/settings/Settings.svelte';
+
+  const tabs: { id: Tab; label: string }[] = [
+    { id: 'home', label: 'Home' },
+    { id: 'profiles', label: 'Profiles' },
+    { id: 'history', label: 'History' },
+    { id: 'beans', label: 'Beans' },
+    { id: 'settings', label: 'Settings' },
+  ];
+
+  let steamOpen = $state(false);
+  // The shot view takes over while pulling and stays until dismissed,
+  // so you can read the finished graph.
+  let shotOpen = $state(false);
+  // It also opens as soon as the machine enters espresso (the group-head brew
+  // button), while it is still getting ready, and closes itself if the shot
+  // is stopped before it ever pours.
+  $effect(() => { if (app.shotActive || app.machine.state?.state === 'espresso') shotOpen = true; });
+  // Flush and steam get their own view while the machine is in that state.
+  const activity = $derived(activityKind(app.machine.state?.state, app.guiding && app.guide !== null, app.guideTemplate === 'steam'));
+  // Full-screen views are opaque, so what sits under them is hidden: no
+  // painting, no animating, no touches, until they close.
+  const covered = $derived((app.guiding && app.guide !== null) || shotOpen || app.editing !== undefined || activity !== null);
+
+  // Sheet colour (Settings → Theme options): read by the tokens in styles.css.
+  $effect(() => { document.documentElement.dataset.tint = app.panelTint; });
+
+  // Screensaver: up while the machine sleeps, once a photo is chosen.
+  // Tapping asks the machine to wake. If it stays asleep (say the wake
+  // didn't get through), the screensaver comes back after a minute.
+  let saverDismissed = $state(false);
+  $effect(() => { if (!app.asleep) saverDismissed = false; });
+  $effect(() => {
+    if (!saverDismissed) return;
+    const t = setTimeout(() => (saverDismissed = false), 60_000);
+    return () => clearTimeout(t);
+  });
+  const saverUp = $derived(app.asleep && app.screensaverImage !== null && !saverDismissed);
+
+  function dismissSaver() {
+    saverDismissed = true;
+    void app.wake().catch(() => {});
+  }
+
+  const STATE_LABELS: Record<string, string> = {
+    idle: 'Ready', sleeping: 'Asleep', heating: 'Heating', preheating: 'Heating', booting: 'Starting up',
+    espresso: 'Pulling', steam: 'Steaming', hotWater: 'Hot water', flush: 'Flushing',
+    needsWater: 'Refill the tank', error: 'Machine error', cleaning: 'Cleaning', descaling: 'Descaling',
+  };
+
+  // Sleep / wake, next to the status. Only offered while the machine is
+  // resting or heating, never mid-shot, steam, flush or cleaning.
+  const SLEEPABLE = new Set(['idle', 'heating', 'preheating']);
+  const machineState = $derived(app.machine.state?.state ?? 'idle');
+  const power = $derived(!app.machineConnected && !app.mock ? null : app.asleep ? 'wake' : SLEEPABLE.has(machineState) ? 'sleep' : null);
+  let powerBusy = $state(false);
+  async function togglePower() {
+    powerBusy = true;
+    try { await (power === 'wake' ? app.wake() : app.sleep()); } catch { /* the status pill shows what the machine did */ } finally { powerBusy = false; }
+  }
+
+  const status = $derived.by(() => {
+    if (app.mock) return { text: 'Demo data', tone: 'demo' };
+    if (!app.gatewayOnline) return { text: "Can't reach Decaid", tone: 'bad' };
+    if (!app.machineConnected) return { text: 'Machine not connected', tone: 'bad' };
+    const s = app.machine.state?.state ?? 'idle';
+    return { text: STATE_LABELS[s] ?? s, tone: s === 'needsWater' || s === 'error' ? 'bad' : s === 'heating' || s === 'preheating' ? 'warm' : 'ok' };
+  });
+</script>
+
+{#if app.appBackground}
+  <div class="app-bg" aria-hidden="true" style="background-image: url({app.appBackground})">
+    <div class="tone" style="background: {toneOverlay(app.bgTone)}"></div>
+  </div>
+{/if}
+
+<div class="shell" class:covered inert={covered}>
+  <header>
+    <nav class="glass" aria-label="Sections">
+      {#each tabs as t (t.id)}
+        <button class="tab" class:active={app.tab === t.id} aria-current={app.tab === t.id ? 'page' : undefined} onclick={() => { if (t.id === 'home' && app.tab === 'home') app.homeReset++; app.tab = t.id; }}>
+          {t.label}
+        </button>
+      {/each}
+    </nav>
+    <div class="status glass {status.tone}" role="status">
+      <span class="dot" aria-hidden="true"></span>
+      {status.text}
+      {#if app.machine.groupTemperature !== undefined}
+        <span class="temp">{app.machine.groupTemperature.toFixed(1)}°</span>
+      {/if}
+    </div>
+    {#if power}
+      <button class="power glass" disabled={powerBusy} onclick={togglePower} aria-label={power === 'wake' ? 'Wake the machine' : 'Put the machine to sleep'}>
+        <span aria-hidden="true">{power === 'wake' ? '☀' : '☾'}</span>{power === 'wake' ? 'Wake' : 'Sleep'}
+      </button>
+    {/if}
+  </header>
+
+  <main>
+    {#if app.error && !app.loaded}
+      <div class="problem">
+        <p>{app.error}</p>
+        <p class="hint">Check that Decaid is running and on the same Wi-Fi. During development, open this page with <code>?gateway=&lt;tablet IP&gt;</code> or <code>?mock=1</code>.</p>
+        <button class="retry glass solid" onclick={() => app.reload()}>Try again</button>
+      </div>
+    {:else if app.tab === 'home'}
+      <Home />
+    {:else if app.tab === 'profiles'}
+      <Profiles />
+    {:else if app.tab === 'history'}
+      <History />
+    {:else if app.tab === 'beans'}
+      <Beans />
+    {:else}
+      <Settings />
+    {/if}
+  </main>
+
+  <BottomBar onSteam={() => (steamOpen = true)} />
+</div>
+
+{#if steamOpen}
+  <SteamModal onClose={() => (steamOpen = false)} />
+{/if}
+
+{#if app.guiding && app.guide}
+  <Guide covered={shotOpen} onclose={() => (app.guiding = false)} />
+{/if}
+
+{#if app.editing !== undefined}
+  <ProfileEditor record={app.editing} seed={app.editSeed} onclose={() => { app.editing = undefined; app.editSeed = null; }} />
+{/if}
+
+{#if shotOpen}
+  <ShotView onClose={() => (shotOpen = false)} />
+{/if}
+
+{#if activity}
+  <ActivityView kind={activity} />
+{/if}
+
+{#if app.screensaverPreview}
+  <Screensaver image={app.screensaverImage} preview onDismiss={() => (app.screensaverPreview = false)} />
+{:else if saverUp}
+  <Screensaver image={app.screensaverImage} onDismiss={dismissSaver} />
+{/if}
+
+<style>
+  /* Optional photo behind everything (Settings → Theme options), with the
+     darken/lighten layer over it. Fixed and static, so it costs nothing per frame. */
+  .app-bg { position: fixed; inset: 0; z-index: -1; background-size: cover; background-position: center; pointer-events: none; }
+  .tone { position: absolute; inset: 0; }
+  /* Under a full-screen view: hidden, and nothing under it animates (Home's guide tile spins forever). */
+  .shell.covered { visibility: hidden; }
+  .shell.covered, .shell.covered :global(*) { animation: none !important; transition: none !important; }
+  .shell {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100%;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gutter);
+    padding: 10px var(--gutter) 8px;
+    position: relative;
+    z-index: 5;
+  }
+
+  /* Floating glass tab bar; the active tab is a lens of brighter glass. */
+  nav {
+    display: flex;
+    gap: 3px;
+    padding: 4px;
+    border-radius: var(--radius-pill);
+  }
+
+  .tab {
+    min-height: 42px;
+    padding: 0 18px;
+    border-radius: var(--radius-pill);
+    font-size: var(--t-md);
+    font-weight: 500;
+    color: var(--paper-dim);
+    transition: background 180ms ease, color 180ms ease, box-shadow 180ms ease;
+  }
+  .tab.active {
+    background: linear-gradient(170deg, rgb(255 255 255 / 0.95), rgb(226 236 232 / 0.86));
+    color: var(--ink);
+    font-weight: 650;
+    box-shadow: 0 4px 12px -6px rgb(0 0 0 / 0.5), inset 0 1px 0 #fff;
+  }
+
+  .status {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 42px;
+    padding: 0 15px;
+    border-radius: var(--radius-pill);
+    font-size: var(--t-sm);
+    color: var(--paper-dim);
+    white-space: nowrap;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; color: var(--go); background: currentColor; box-shadow: 0 0 8px currentColor; }
+  .status.warm .dot { color: var(--warn); }
+  .status.bad .dot { color: var(--stop); }
+  .status.demo .dot { color: var(--cat-3); }
+  .temp { color: var(--paper); font-weight: 600; }
+  .power {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 42px;
+    padding: 0 15px;
+    border-radius: var(--radius-pill);
+    font-size: var(--t-sm);
+    font-weight: 650;
+    color: var(--paper);
+    white-space: nowrap;
+  }
+  .power span { font-size: var(--t-md); }
+  .power:disabled { opacity: 0.5; }
+
+  main {
+    min-height: 0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .problem {
+    max-width: 480px;
+    margin: 12vh auto 0;
+    padding: 0 var(--gutter);
+    display: grid;
+    gap: 12px;
+    font-size: var(--t-md);
+  }
+  .hint { color: var(--paper-dim); font-size: var(--t-sm); }
+  code { font-size: 0.9em; color: var(--paper); }
+  .retry {
+    justify-self: start;
+    min-height: var(--touch);
+    padding: 0 21px;
+    border-radius: var(--radius-control);
+    font-weight: 650;
+  }
+
+  @media (max-width: 900px) {
+    .tab { padding: 0 10px; font-size: var(--t-sm); }
+    .status .temp { display: none; }
+  }
+</style>
