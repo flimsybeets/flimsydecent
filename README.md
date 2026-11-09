@@ -1,6 +1,8 @@
 # FlimsyDecent
 
-A [Decaid](https://github.com/decentespresso/decaid) skin for the Decent DE1, for people with a lot of profiles and a routine they like to follow.
+A [Decaid](https://github.com/decentespresso/decaid) skin for the Decent DE1, for people who use a lot of profiles and perhaps others in the household who needs guidance. 
+
+I built this entirely to suit my own needs because that's the new world we live in, but broke my rule of building something just for myself as I think there may be others that would find it suits them, so I have made this fork to be a bit more generic. It's vibe-coded and will be maintained as I need, feel free to fork if you want to make your own adaptions as I probably won't be taking requests.  
 
 ![A short tour of FlimsyDecent: pick a category and profile, dial in, start a shot and watch it live.](docs/walkthrough.gif)
 
@@ -8,7 +10,7 @@ A [Decaid](https://github.com/decentespresso/decaid) skin for the Decent DE1, fo
 
 - **Categories → profile → bag → Start shot.** Group profiles into categories you make yourself. Each profile tile can show a little graph of its last shot or its plan.
 - **Dial-in per bag.** Grind, dose, yield and temperature are remembered for every bag and profile you use together, and carried over when you open a new bag of the same coffee. "Don't track" brews a freezer dose or a one-off without touching any bag.
-- **Guide me.** A step-by-step walkthrough of your own routine, from weighing beans to rinsing the group: it follows your scale and the machine (weighing to the gram, starting the shot, flushing, steaming). Start from a preset (Simple, WDT and puck screen, Milk drinks), then add, remove, reorder and reword steps, add your own (with a timer or a photo of your kit), and share a workflow by copying it as text.
+- **Guide me.** A step-by-step walkthrough of a routine, from weighing beans to rinsing the group: it follows your scale and the machine (weighing to the gram, starting the shot, flushing, steaming). Start from a preset (Simple, WDT and puck screen, Milk drinks), then add, remove, reorder and reword steps, add your own (with a timer or a photo of your kit), and share a workflow by copying it as text.
 - **Live shot view.** Car-style dials for flow, pressure and temperatures beside the graph; the target weight as a bold line.
 - **History.** Touch the graph to read every value, rate and note shots, brew one again with the same settings, upload to Visualizer.
 - **Beans.** Coffees with photos (the card takes its colour from the photo), bags that count down as you brew.
