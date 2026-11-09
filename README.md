@@ -1,8 +1,6 @@
 # FlimsyDecent
 
-A [Decaid](https://github.com/decentespresso/decaid) skin for the Decent DE1, for people who use a lot of profiles and perhaps others in the household who needs guidance. 
-
-I built this entirely to suit my own needs because that's the new world we live in, but broke my rule of building something just for myself as I think there may be others that would find it suits them, so I have made this fork to be a bit more generic. It's vibe-coded and will be maintained as I need, feel free to fork if you want to make your own adaptions as I probably won't be taking requests.  
+A [Decaid](https://github.com/decentespresso/decaid) skin for the Decent DE1, for people with a lot of profiles and a routine they like to follow.
 
 ![A short tour of FlimsyDecent: pick a category and profile, dial in, start a shot and watch it live.](docs/walkthrough.gif)
 
@@ -10,7 +8,7 @@ I built this entirely to suit my own needs because that's the new world we live 
 
 - **Categories → profile → bag → Start shot.** Group profiles into categories you make yourself. Each profile tile can show a little graph of its last shot or its plan.
 - **Dial-in per bag.** Grind, dose, yield and temperature are remembered for every bag and profile you use together, and carried over when you open a new bag of the same coffee. "Don't track" brews a freezer dose or a one-off without touching any bag.
-- **Guide me.** A step-by-step walkthrough of a routine, from weighing beans to rinsing the group: it follows your scale and the machine (weighing to the gram, starting the shot, flushing, steaming). Start from a preset (Simple, WDT and puck screen, Milk drinks), then add, remove, reorder and reword steps, add your own (with a timer or a photo of your kit), and share a workflow by copying it as text.
+- **Guide me.** A step-by-step walkthrough of your own routine, from weighing beans to rinsing the group: it follows your scale and the machine (weighing to the gram, starting the shot, flushing, steaming). Start from a preset (Simple, WDT and puck screen, Milk drinks), then add, remove, reorder and reword steps, add your own (with a timer or a photo of your kit), and share a workflow by copying it as text.
 - **Live shot view.** Car-style dials for flow, pressure and temperatures beside the graph; the target weight as a bold line.
 - **History.** Touch the graph to read every value, rate and note shots, brew one again with the same settings, upload to Visualizer.
 - **Beans.** Coffees with photos (the card takes its colour from the photo), bags that count down as you brew.
@@ -56,11 +54,34 @@ All pictures are taken from the built-in demo mode (`?mock=1`), so the machine, 
 
 To retake the pictures and the video, run the dev server and `node scripts/capture-docs.cjs` (it needs Playwright and ffmpeg; see the comment at the top of the script).
 
-## Install on the tablet
+## Install
 
-Decaid → Launcher → Skins → cog menu → Install skin → GitHub Release → `flimsybeets/flimsydecent`. Settings → Connection → "Check for skin updates" picks up new releases.
+You need [Decaid](https://github.com/decentespresso/decaid) on the tablet, connected to your DE1. The tablet also needs internet access for the install.
 
-From your laptop over Wi-Fi:
+1. **Go to Decaid's launcher.** If another skin is open, leave it for the Decent dashboard (the launcher).
+2. **Open Skins.** Tap **Skins** (the palette icon). This opens the Web Interface page.
+3. **Install from GitHub.** Tap the cog at the top right, then **Install skin → GitHub Release**.
+4. **Enter the repository.** Type `flimsybeets/flimsydecent` in **Repository** and leave **Asset name** empty. Tap **Install**. Decaid downloads the latest release and shows "Skin installed from GitHub".
+5. **Choose it.** Pick **FlimsyDecent** in the skin list. Decaid keeps it as your skin from then on, also after a restart.
+6. **Open it.** Tap **Go to skin**.
+
+To get to the launcher later, use Decaid's own way back to the dashboard. Decaid shows a short navigation guide the first time a skin opens.
+
+### Updates
+
+In FlimsyDecent, open **Settings → Connection → Check for skin updates**. If a newer version is installed, tap **Reload** to use it.
+
+You can also update from Decaid: **Skins → cog → Check for updates** re-fetches every skin from where it was installed.
+
+### Camera
+
+The camera is used for coffee and step photos. The first time you tap **Take photo**, Decaid asks whether FlimsyDecent may use the camera. You can change your answer later on the Skins page.
+
+### Other ways to install
+
+**ZIP file.** Download `flimsydecent-<version>.zip` from [Releases](https://github.com/flimsybeets/flimsydecent/releases) onto the tablet. Then use **Skins → cog → Install skin → ZIP file**. A ZIP install is selected and opened straight away. It has no source to update from, so install a newer zip the same way.
+
+**From your laptop over Wi-Fi** (for development):
 
 ```bash
 npm install
