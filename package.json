@@ -1,7 +1,7 @@
 {
   "name": "flimsydecent",
   "private": true,
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "description": "A Decaid skin for the Decent DE1: profiles in categories, per-bag dial-in, live shot dials and a Guide me walkthrough you set up yourself",
   "license": "AGPL-3.0-or-later",
